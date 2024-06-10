@@ -23,6 +23,7 @@
 #include "ina3221.h"
 #include "roti2c.h"
 #include "hardware/watchdog.h"
+#include "Common.h"
 /* ============= DEFINICIONES ================================================== */
 // HARDWARE
 #define DO1_PIN 1      // Salida digital 1 a GPIO 1 (pico pin 2)
@@ -41,11 +42,9 @@
 #define TOPIC2  "rotador/pid_h"
 #define TOPIC3  "rotador/movimiento_v"
 #define TOPIC4  "rotador/pid_v"
+#define TOPIC5  "rotador/automatico"
 
-// FUNCIONES
-void callback(char *topic, byte *payload, unsigned int length); // Funcion para la recepcion via MQTT
-void reconnect(void);                                           // Reconectar al servidor mqtt
-void ftostr(float val, char *dato);
+//void ftostr(float val, char *dato);
 // DEFINICIONES PARA LA CONEXION ETHERNET CON ENC28J60
 byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xEF};  // Dirección MAC del módulo Ethernet
 IPAddress server(192, 168, 1,100);                  // IP del broker MQTT
@@ -142,6 +141,7 @@ void setup()
   mqttClient.subscribe(TOPIC2);
   mqttClient.subscribe(TOPIC3);
   mqttClient.subscribe(TOPIC4);
+  mqttClient.subscribe(TOPIC5);
   mqttClient.loop();
   rotador_h.begin(&Wire);
   rotador_v.begin(&Wire);
@@ -158,7 +158,7 @@ void setup()
   mqttClient.publish("rotador/estado_h","PARADO");
   mqttClient.publish("rotador/estado_v","PARADO");
   delay(1000);
-  watchdog_enable(800, 1);
+  watchdog_enable(3000, 1);
 }
 /* ============= LOOP CORE 0 =================================================== */
 void loop()
@@ -199,10 +199,7 @@ void loop()
         break;
       case 's':           // STOP
         Serial.println("-> Detenido");
-        dato_mqtt = 29555;  // 'ss'
-        rotador_h.write(ROT_IAR_REG_STOP, &dato_mqtt);
-        mqttClient.publish("rotador/estado_h","PARADO");
-        estado_motor_h = STOP;
+        stop_h();
         break;
       case 'a':           // Movimiento antihorario
         Serial.println("-> Movimiento antihorario...");
@@ -257,10 +254,7 @@ void loop()
         break;
       case 'S':           // STOP
         Serial.println("-> Detenido");
-        dato_mqtt = 29555;  // 'ss'
-        rotador_v.write(ROT_IAR_REG_STOP, &dato_mqtt);
-        mqttClient.publish("rotador/estado_v","PARADO");
-        estado_motor_v = STOP;
+        stop_v();
         break;
       case 'A':           // Movimiento antihorario
         Serial.println("-> Movimiento antihorario...");
@@ -291,6 +285,10 @@ void loop()
         rotador_v.write(ROT_IAR_REG_SETMAX, &dato_mqtt);    // cambie el nombre del registro a SETMAX
         break ;         
       /*** Otros casos ***/
+      case 'g':
+        medir_grilla();
+        break;
+      /*** Comando incorrecto ***/
       default:
         Serial.println("-> Comando incorrecto :(");
     }
@@ -304,15 +302,8 @@ void loop()
   {
     //if (estado_motor_h != STOP)     // Si el motor se esta moviendo
     //{                               // Pido el valor del angulo y lo envio por mqtt
-    rotador_h.read(ROT_IAR_REG_ANGULO, &angulo_h);
-    Serial.print("-> Angulo h: ");Serial.print(angulo_h);
-    sprintf(angulo_str,"%.2f",angulo_h);
-    mqttClient.publish("rotador/angulo_h",angulo_str);
-
-    rotador_v.read(ROT_IAR_REG_ANGULO, &angulo_v);
-    Serial.print("-> Angulo v: ");Serial.println(angulo_v);
-    sprintf(angulo_str,"%.2f",angulo_v);
-    mqttClient.publish("rotador/angulo_v",angulo_str);
+    posicion_actual();
+    mqttClient.publish("rotador/estado","MANUAL");
     //}
     // Toggle led - Alive test
     (digitalRead(LED2_PIN)) ? digitalWrite(LED2_PIN, LOW) : digitalWrite(LED2_PIN, HIGH);
@@ -323,6 +314,32 @@ void loop()
   //delay(200);
 }
 /* ============= FUNCIONES ===================================================== */
+
+
+/**
+ * @brief Parada motor horizontal
+*/
+void stop_h()
+{
+  dato_mqtt = 29555; // 'ss'
+  rotador_h.write(ROT_IAR_REG_STOP, &dato_mqtt);
+  mqttClient.publish("rotador/estado_h", "PARADO");
+  estado_motor_h = STOP;
+}
+
+
+/**
+ * @brief Parada motor vertical
+*/
+void stop_v()
+{
+  dato_mqtt = 29555; // 'ss'
+  rotador_v.write(ROT_IAR_REG_STOP, &dato_mqtt);
+  mqttClient.publish("rotador/estado_v", "PARADO");
+  estado_motor_v = STOP;
+}
+
+
 /**
  * @brief Calback MQTT
  * 
@@ -366,6 +383,7 @@ void reconnect()
       mqttClient.subscribe(TOPIC2);
       mqttClient.subscribe(TOPIC3);
       mqttClient.subscribe(TOPIC4);
+      mqttClient.subscribe(TOPIC5);
     }
     else
     {
@@ -378,6 +396,105 @@ void reconnect()
   }
 }
 
+/**
+ * @brief Medir
+*/
+void medir_grilla(void)
+{
+  mqttClient.publish("rotador/estado","AUTOMATICO");
+  float v_alto, v_bajo;
+  char dato_str[6];
+  // Todo parado
+  stop_h();
+  stop_v();
+  // Tomo angulos
+  posicion_actual();
+  v_alto = angulo_v;
+  v_bajo = angulo_v - 10.0;
+  
+  sprintf(dato_str,"%.2f",v_alto);
+  mqttClient.publish(TOPIC5,dato_str);
+  sprintf(dato_str,"%.2f",v_bajo);
+  mqttClient.publish(TOPIC5,dato_str);
+  sprintf(dato_str,"%d",velocidad_v);
+  mqttClient.publish(TOPIC5,dato_str);
+
+  /*// Baja 10º con velocidad al 20%
+  rotador_v.write(ROT_IAR_REG_HORARIO, &velocidad_v);   // Baja
+  mqttClient.publish("rotador/estado_v","MOVIMIENTO HORARIO");
+  estado_motor_v = HORARIO;
+  delay(500);
+  while(angulo_v > v_bajo){
+    posicion_actual();              // Leo angulos
+    watchdog_update();
+    delay(500);
+  }*/
+
+  for (size_t i = 0; i < 5; i++) {
+    // Baja 10º con la velocidad seteada
+    rotador_v.write(ROT_IAR_REG_HORARIO, &velocidad_v);   // Baja
+    mqttClient.publish("rotador/estado_v","MOVIMIENTO HORARIO");
+    estado_motor_v = HORARIO;
+    delay(500);
+    do {
+      posicion_actual();              // Leo angulos
+      watchdog_update();
+      delay(500);
+    } while(angulo_v > v_bajo);   
+    /*while(angulo_v > v_bajo){
+      posicion_actual();              // Leo angulos
+      watchdog_update();
+      delay(500);
+    }*/
+    stop_v();                         // Paro el movimiento vertical
+    delay(500);
+    // Aumentar 1º en azimut
+    rotador_h.write(ROT_IAR_REG_HORARIO, &velocidad_h);
+    mqttClient.publish("rotador/estado_h","MOVIMIENTO HORARIO");
+    estado_motor_h = HORARIO;
+    delay(800);
+    stop_h();
+    // Sube 10º con velocidad al 20%
+    rotador_v.write(ROT_IAR_REG_ANTIHOR, &velocidad_v);   // Sube
+    mqttClient.publish("rotador/estado_v","MOVIMIENTO ANTIHORARIO");
+    estado_motor_v = ANTIHORARIO;
+    delay(500);
+    while(angulo_v < v_alto){
+      posicion_actual();              // Leo angulos
+      watchdog_update();
+      delay(500);
+    }
+    stop_v();                         // Paro el movimiento vertical
+    delay(500);
+    // Aumentar 1º en azimut
+    rotador_h.write(ROT_IAR_REG_HORARIO, &velocidad_h);
+    mqttClient.publish("rotador/estado_h","MOVIMIENTO HORARIO");
+    estado_motor_h = HORARIO;
+    delay(800);
+    stop_h();
+    (digitalRead(LED1_PIN)) ? digitalWrite(LED2_PIN, LOW) : digitalWrite(LED2_PIN, HIGH);
+  }
+  
+  // Todo parado
+  stop_h();
+  stop_v();
+}
+
+/**
+ * @brief Lee los angulos y los publica por MQTT
+*/
+void posicion_actual(void)
+{
+  rotador_h.read(ROT_IAR_REG_ANGULO, &angulo_h);
+  Serial.print("-> Angulo h: ");Serial.print(angulo_h);
+  sprintf(angulo_str,"%.2f",angulo_h);
+  mqttClient.publish("rotador/angulo_h",angulo_str);
+
+  rotador_v.read(ROT_IAR_REG_ANGULO, &angulo_v);
+  Serial.print("-> Angulo v: ");Serial.println(angulo_v);
+  sprintf(angulo_str,"%.2f",angulo_v);
+  mqttClient.publish("rotador/angulo_v",angulo_str);
+}
 
 /**
  * @brief Pasa de float a string
